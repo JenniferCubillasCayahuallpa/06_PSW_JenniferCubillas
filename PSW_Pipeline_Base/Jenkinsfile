@@ -1,0 +1,172 @@
+pipeline {
+    agent any
+
+    environment {
+        PROJECT_NAME    = 'PSW Pipeline Base'
+        SONAR_PROJECT   = 'psw-pipeline-base'
+        APP_PORT        = '8086'
+        JMETER_HOME     = 'C:\\apache-jmeter'
+        JMETER_PLAN     = 'jmeter\\psw-pipeline-test.jmx'
+        JMETER_RESULTS  = 'jmeter\\results.jtl'
+        JMETER_REPORT   = 'jmeter\\report'
+    }
+
+    tools {
+        maven 'Maven 3.9'
+        jdk   'JDK 17'
+    }
+
+    stages {
+
+        // ─────────────────────────────────────────────
+        // 1. CHECKOUT
+        // ─────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                echo '📥 Obteniendo código fuente...'
+                checkout scm
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 2. BUILD
+        // ─────────────────────────────────────────────
+        stage('Build') {
+            steps {
+                echo '🔨 Compilando el proyecto...'
+                dir('PSW_Pipeline_Base') {
+                    bat 'mvn clean package -DskipTests'
+                }
+            }
+            post {
+                success { echo '✅ Compilación exitosa.' }
+                failure { echo '❌ Error durante la compilación.' }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 3. TEST
+        // ─────────────────────────────────────────────
+        stage('Test') {
+            steps {
+                echo '🧪 Ejecutando pruebas unitarias...'
+                dir('PSW_Pipeline_Base') {
+                    bat 'mvn test'
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: 'PSW_Pipeline_Base/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 4. ANÁLISIS SONARQUBE
+        // ─────────────────────────────────────────────
+        stage('SonarQube Analysis') {
+            steps {
+                echo '🔍 Analizando calidad de código con SonarQube...'
+                dir('PSW_Pipeline_Base') {
+                    withSonarQubeEnv('SonarQube') {
+                        bat """
+                            mvn sonar:sonar ^
+                                -Dsonar.projectKey=%SONAR_PROJECT% ^
+                                -Dsonar.projectName="%PROJECT_NAME%" ^
+                                -Dsonar.java.coveragePlugin=jacoco ^
+                                -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+                        """
+                    }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 5. QUALITY GATE
+        // ─────────────────────────────────────────────
+        stage('Quality Gate') {
+            steps {
+                echo '🚦 Verificando Quality Gate de SonarQube...'
+                timeout(time: 2, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: false
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 6. PRUEBAS DE CARGA — JMETER
+        // ─────────────────────────────────────────────
+        stage('JMeter Load Test') {
+            steps {
+                echo '📊 Ejecutando pruebas de carga con JMeter...'
+                dir('PSW_Pipeline_Base') {
+                    bat """
+                        %JMETER_HOME%\\bin\\jmeter.bat ^
+                            -n ^
+                            -t %JMETER_PLAN% ^
+                            -l %JMETER_RESULTS% ^
+                            -e ^
+                            -o %JMETER_REPORT% ^
+                            -Jhost=localhost ^
+                            -Jport=%APP_PORT%
+                    """
+                }
+            }
+            post {
+                always {
+                    publishHTML(target: [
+                        allowMissing         : true,
+                        alwaysLinkToLastBuild: true,
+                        keepAll              : true,
+                        reportDir            : 'PSW_Pipeline_Base/jmeter/report',
+                        reportFiles          : 'index.html',
+                        reportName           : 'JMeter Load Test Report'
+                    ])
+                }
+            }
+        }
+
+    }
+
+    // ─────────────────────────────────────────────
+    // NOTIFICACIONES SLACK
+    // ─────────────────────────────────────────────
+    post {
+        success {
+            echo '🎉 Pipeline completado exitosamente.'
+            slackSend(
+                channel   : '#psw-pipeline',
+                color     : 'good',
+                message   : """✅ *BUILD EXITOSO*
+Proyecto : ${env.PROJECT_NAME}
+Job      : ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Duración : ${currentBuild.durationString}
+Ver      : ${env.BUILD_URL}"""
+            )
+        }
+        failure {
+            echo '💥 El pipeline falló.'
+            slackSend(
+                channel   : '#psw-pipeline',
+                color     : 'danger',
+                message   : """❌ *BUILD FALLIDO*
+Proyecto : ${env.PROJECT_NAME}
+Job      : ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Duración : ${currentBuild.durationString}
+Ver      : ${env.BUILD_URL}"""
+            )
+        }
+        unstable {
+            slackSend(
+                channel   : '#psw-pipeline',
+                color     : 'warning',
+                message   : """⚠️ *BUILD INESTABLE*
+Proyecto : ${env.PROJECT_NAME}
+Job      : ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Ver      : ${env.BUILD_URL}"""
+            )
+        }
+    }
+
+}
